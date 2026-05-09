@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>GEM Avatar</title>
+    <style>
+        body {
+            margin: 0;
+            background: transparent;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            overflow: hidden;
+        }
+        #avatar {
+            width: 100%;
+            height: auto;
+            transition: opacity 0.2s;
+        }
+    </style>
+</head>
+<body>
+    <img id="avatar" src="assets/avatar/neutro/frame1.png" alt="GEM" />
+
+    <script>
+        // Configuración: 9 emociones, cada una con 3 frames
+        const EMOCIONES = [
+            "neutro", "alegre", "triste", "enojado", "sorprendido",
+            "confundido", "pensativo", "dormido", "ansioso"
+        ];
+        const FRAMES_POR_EMOCION = 3; // frame1.png, frame2.png, frame3.png
+
+        let emocionActual = "neutro";
+        let hablando = false;
+        let frameIndex = 1;
+        let animacionInterval = null;
+        let ultimoRMS = 0.0;
+
+        const avatarImg = document.getElementById("avatar");
+
+        function actualizarImagen(emocion, frameNum = 1) {
+            const src = `assets/avatar/${emocion}/frame${frameNum}.png`;
+            avatarImg.src = src;
+        }
+
+        function iniciarAnimacionHabla() {
+            if (animacionInterval) return;
+            hablando = true;
+            let paso = 1;
+            animacionInterval = setInterval(() => {
+                if (!hablando) {
+                    // Si dejó de hablar, mostrar frame1 de la emoción actual
+                    actualizarImagen(emocionActual, 1);
+                    clearInterval(animacionInterval);
+                    animacionInterval = null;
+                    return;
+                }
+                frameIndex = (frameIndex % FRAMES_POR_EMOCION) + 1;
+                actualizarImagen(emocionActual, frameIndex);
+            }, 100); // cambiar cada 100ms
+        }
+
+        function detenerAnimacionHabla() {
+            hablando = false;
+        }
+
+        // Conexión WebSocket al backend
+        const ws = new WebSocket("ws://localhost:8765/ws");
+
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            if (data.tipo === "expresion") {
+                if (data.emocion && EMOCIONES.includes(data.emocion)) {
+                    emocionActual = data.emocion;
+                    if (!hablando) {
+                        actualizarImagen(emocionActual, 1);
+                    }
+                }
+            } else if (data.tipo === "lipsync") {
+                const rms = data.amplitud || 0;
+                const terminado = data.terminado || false;
+                if (rms > 0.01) {
+                    // Comenzar o continuar animación
+                    if (!hablando) {
+                        iniciarAnimacionHabla();
+                    }
+                } else if (terminado || rms <= 0.01) {
+                    detenerAnimacionHabla();
+                }
+            }
+        };
+
+        ws.onclose = () => {
+            console.log("WebSocket cerrado, reintentando en 3s...");
+            setTimeout(() => location.reload(), 3000);
+        };
+    </script>
+</body>
+</html>
