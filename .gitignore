@@ -1,27 +1,27 @@
-gem_vertex/.env
-gem_vertex/data/vtube_token.txt
+.env
+data/vtube_token.txt
 
-gem_vertex/__pycache__/
-gem_vertex/*.py[cod]
-gem_vertex/*$py.class
-gem_vertex/*.egg-info/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
 venv/
-gem_vertex/env/
-gem_vertex/.pytest_cache/
+env/
+.pytest_cache/
 
-gem_vertex/data/chromadb/
-gem_vertex/assets/face_landmarker.task
+data/chromadb/
+assets/face_landmarker.task
 
 # Rust / Tauri
-gem_vertex/src-tauri/target/
-gem_vertex/src-tauri/Cargo.lock
+src-tauri/target/
+src-tauri/Cargo.lock
 src-tauri/gen/
 
 # IDE
-gem_vertex/.vscode/
-gem_vertex/.idea/
-gem_vertex/*.swp
-gem_vertex/.DS_Store
+.vscode/
+.idea/
+*.swp
+data/.DS_Store
 fallan/
 # Logs
-gem_vertex/*.log
+data/*.log
