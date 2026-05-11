@@ -1,20 +1,14 @@
 """
-Detector por Actividad de Voz (VAD).
+Detector por Actividad de Voz (VAD) con auto-calibración.
 
-Reemplaza completamente el sistema de wake word (openWakeWord / RMS fallback).
+Al iniciar mide el ruido ambiente durante 1.5 s y fija el umbral
+automáticamente en 3× el nivel de ruido del micrófono.
+Esto evita tener que ajustar VAD_RMS_UMBRAL manualmente.
 
-Lógica:
-  1. Escucha el micrófono continuamente en chunks de 50ms.
-  2. Cuando detecta voz (RMS > umbral) empieza a GRABAR y bufferear audio.
-  3. Cuando hay silencio suficiente, revisa cuánto duró la frase:
-       · Muy corta (< vad_min_frase_s) → descarta. Era tos, ruido, etc.
-       · Larga enough                  → dispara callback con TODO el audio.
-  4. Durante el cooldown post-TTS no escucha, para no re-triggear con la
-     propia voz del asistente.
-
-Callback: callback(audio_np: np.ndarray)  ← recibe el audio directamente.
+Solo dispara si la frase duró >= vad_min_frase_s de voz continua.
 """
 
+import asyncio
 import logging
 import threading
 import time
@@ -24,41 +18,28 @@ from backend.config import ajustes
 
 log = logging.getLogger("gem.vad")
 
-# Estados del detector
-_SILENCIO  = "silencio"
-_HABLANDO  = "hablando"
+_SILENCIO = "silencio"
+_HABLANDO = "hablando"
 
 
 class VADDetector:
-    def __init__(
-        self,
-        callback,                     # async def callback(audio_np: np.ndarray)
-        loop,
-        mic_lock: threading.Lock,
-        procesando_event: threading.Event,
-    ):
-        self._callback       = callback
-        self._loop           = loop
-        self._mic_lock       = mic_lock
-        self._procesando     = procesando_event
-        self._activo         = False
+    def __init__(self, callback, loop, mic_lock: threading.Lock, procesando_event: threading.Event):
+        self._callback   = callback      # async def callback(audio_np)
+        self._loop       = loop
+        self._mic_lock   = mic_lock
+        self._procesando = procesando_event
+        self._activo     = False
         self._hilo: threading.Thread | None = None
-        self._cooldown_hasta = 0.0    # timestamp hasta el que silencia el VAD
+        self._cooldown_hasta = 0.0
+        self._umbral     = ajustes.vad_rms_umbral   # se sobreescribe en calibración
+        self.on_estado_vad = None   # async def on_estado_vad(hablando: bool)
 
-    # ─────────────────────────────────────────────
-    #  API pública
-    # ─────────────────────────────────────────────
+    # ─── API pública ────────────────────────────────────────────────
 
     def iniciar(self):
         self._activo = True
-        self._hilo = threading.Thread(target=self._loop_vad, daemon=True)
+        self._hilo = threading.Thread(target=self._run, daemon=True)
         self._hilo.start()
-        log.info(
-            "VAD iniciado — umbral=%.3f, frase_mín=%.1fs, silencio=%.1fs",
-            ajustes.vad_rms_umbral,
-            ajustes.vad_min_frase_s,
-            ajustes.silence_duration_s,
-        )
 
     def detener(self):
         self._activo = False
@@ -66,159 +47,145 @@ class VADDetector:
             self._hilo.join(timeout=2.0)
 
     def iniciar_cooldown(self):
-        """Llama esto antes de reproducir TTS para que VAD no se re-active."""
         self._cooldown_hasta = time.time() + ajustes.fallback_cooldown_s
 
-    # ─────────────────────────────────────────────
-    #  Loop principal
-    # ─────────────────────────────────────────────
+    # ─── Calibración ────────────────────────────────────────────────
 
-    def _loop_vad(self):
-        chunk_dur    = 0.05                                      # 50 ms por chunk
+    def _calibrar(self) -> float:
+        """
+        Mide el RMS ambiente durante 1.5 s (sin hablar) y devuelve
+        umbral = max(ruido×3, 0.005).  Informa en log.
+        """
+        dur    = 1.5
+        frames = int(dur * ajustes.sample_rate)
+        try:
+            audio = sd.rec(frames, samplerate=ajustes.sample_rate,
+                           channels=1, dtype="float32", blocking=True)
+            ruido = float(np.sqrt(np.mean(audio ** 2)))
+            umbral = max(ruido * 3.0, 0.005)
+            log.info(
+                "VAD calibrado — ruido_ambiente=%.4f  umbral=%.4f  "
+                "(ajusta VAD_RMS_UMBRAL en .env para sobreescribir)",
+                ruido, umbral,
+            )
+            return umbral
+        except Exception as e:
+            log.warning("Calibración falló (%s), usando umbral del .env (%.4f)", e, self._umbral)
+            return self._umbral
+
+    # ─── Loop principal ──────────────────────────────────────────────
+
+    def _notificar(self, hablando: bool):
+        cb = self.on_estado_vad
+        if cb and self._loop:
+            try:
+                asyncio.run_coroutine_threadsafe(cb(hablando), self._loop)
+            except Exception:
+                pass
+
+    def _disparar(self, audio_np: np.ndarray):
+        self._procesando.set()
+        def _limpiar(_):
+            self._procesando.clear()
+        try:
+            f = asyncio.run_coroutine_threadsafe(self._callback(audio_np), self._loop)
+            f.add_done_callback(_limpiar)
+        except Exception as e:
+            log.exception("VAD dispatch error: %s", e)
+            self._procesando.clear()
+
+    def _run(self):
+        # Calibrar antes de abrir el stream continuo
+        self._umbral = self._calibrar()
+
+        chunk_dur    = 0.05   # 50 ms
         chunk_frames = int(chunk_dur * ajustes.sample_rate)
         silencio_max = max(1, int(ajustes.silence_duration_s / chunk_dur))
         max_chunks   = int(ajustes.max_grabacion_s / chunk_dur)
+        min_chunks   = max(1, int(ajustes.vad_min_frase_s / chunk_dur))
 
-        umbral        = ajustes.vad_rms_umbral
-        min_frase_chunks = max(1, int(ajustes.vad_min_frase_s / chunk_dur))
+        log.info(
+            "VAD listo — umbral=%.4f  frase_mín=%.1fs  silencio=%.1fs",
+            self._umbral, ajustes.vad_min_frase_s, ajustes.silence_duration_s,
+        )
 
-        estado          = _SILENCIO
-        buffer: list[np.ndarray] = []
+        estado = _SILENCIO
+        buf: list[np.ndarray] = []
         chunks_silencio = 0
-
         stream = None
 
         while self._activo:
-            # Esperamos si hay una petición en proceso
-            if self._procesando.is_set():
-                if stream:
-                    _cerrar_stream(stream)
-                    stream = None
-                time.sleep(0.1)
-                estado          = _SILENCIO
-                buffer          = []
-                chunks_silencio = 0
-                continue
 
-            # En cooldown (esperando a que termine el TTS)
-            if time.time() < self._cooldown_hasta:
-                if stream:
-                    _cerrar_stream(stream)
-                    stream = None
-                time.sleep(0.05)
-                estado          = _SILENCIO
-                buffer          = []
-                chunks_silencio = 0
+            # Pausa si hay comando en proceso o cooldown TTS
+            if self._procesando.is_set() or time.time() < self._cooldown_hasta:
+                _cerrar(stream); stream = None
+                if estado == _HABLANDO:
+                    self._notificar(False)
+                estado = _SILENCIO; buf = []; chunks_silencio = 0
+                time.sleep(0.08)
                 continue
 
             # Abrir micrófono si hace falta
             if stream is None:
                 try:
-                    with self._mic_lock:
-                        stream = sd.InputStream(
-                            samplerate=ajustes.sample_rate,
-                            channels=1,
-                            dtype="float32",
-                            blocksize=chunk_frames,
-                        )
-                        stream.start()
+                    stream = sd.InputStream(
+                        samplerate=ajustes.sample_rate,
+                        channels=1, dtype="float32",
+                        blocksize=chunk_frames,
+                    )
+                    stream.start()
                 except Exception as e:
-                    log.error("VAD: no se pudo abrir el mic: %s", e)
-                    time.sleep(1.0)
-                    continue
+                    log.error("VAD: no pudo abrir mic: %s", e)
+                    time.sleep(1.0); continue
 
             # Leer chunk
             try:
                 frame, _ = stream.read(chunk_frames)
             except Exception as e:
-                log.debug("VAD: error leyendo mic: %s", e)
-                _cerrar_stream(stream)
-                stream = None
-                continue
+                log.debug("VAD read error: %s", e)
+                _cerrar(stream); stream = None; continue
 
-            flat = frame.flatten()
-            rms  = float(np.sqrt(np.mean(flat ** 2)))
-            hay_voz = rms > umbral
+            rms     = float(np.sqrt(np.mean(frame.flatten() ** 2)))
+            hay_voz = rms > self._umbral
 
-            # ── Máquina de estados ──
             if estado == _SILENCIO:
                 if hay_voz:
-                    estado          = _HABLANDO
-                    buffer          = [flat]
+                    estado = _HABLANDO
+                    buf    = [frame.flatten()]
                     chunks_silencio = 0
-                    log.debug("VAD: voz detectada (rms=%.4f)", rms)
+                    self._notificar(True)
 
             elif estado == _HABLANDO:
-                buffer.append(flat)
-
+                buf.append(frame.flatten())
                 if hay_voz:
                     chunks_silencio = 0
                 else:
                     chunks_silencio += 1
                     if chunks_silencio >= silencio_max:
-                        # Fin de frase: evaluar duración
-                        duracion_chunks = len(buffer) - chunks_silencio
-                        if duracion_chunks >= min_frase_chunks:
-                            log.info(
-                                "VAD: frase detectada — %.1f s de voz",
-                                duracion_chunks * chunk_dur,
-                            )
-                            audio = np.concatenate(buffer)
-                            self._disparar(audio)
+                        voz_chunks = len(buf) - chunks_silencio
+                        self._notificar(False)
+                        if voz_chunks >= min_chunks:
+                            log.info("VAD: frase %.1fs → pipeline", voz_chunks * chunk_dur)
+                            self._disparar(np.concatenate(buf))
                         else:
-                            log.debug(
-                                "VAD: frase descartada — %.1f s (mín %.1f s)",
-                                duracion_chunks * chunk_dur,
-                                ajustes.vad_min_frase_s,
-                            )
-                        estado          = _SILENCIO
-                        buffer          = []
-                        chunks_silencio = 0
+                            log.debug("VAD: descartada (%.1fs < %.1fs mín)",
+                                      voz_chunks * chunk_dur, ajustes.vad_min_frase_s)
+                        estado = _SILENCIO; buf = []; chunks_silencio = 0
                         continue
 
-                # Seguridad: frase demasiado larga → forzar dispatch
-                if len(buffer) >= max_chunks:
-                    log.info("VAD: frase máxima alcanzada, disparando")
-                    audio = np.concatenate(buffer)
-                    self._disparar(audio)
-                    estado          = _SILENCIO
-                    buffer          = []
-                    chunks_silencio = 0
+                # Seguridad: frase demasiado larga
+                if len(buf) >= max_chunks:
+                    self._notificar(False)
+                    self._disparar(np.concatenate(buf))
+                    estado = _SILENCIO; buf = []; chunks_silencio = 0
 
-        if stream:
-            _cerrar_stream(stream)
-
-    # ─────────────────────────────────────────────
-    #  Dispatch
-    # ─────────────────────────────────────────────
-
-    def _disparar(self, audio_np: np.ndarray):
-        """Envía el audio capturado al orquestador de forma thread-safe."""
-        import asyncio
-
-        self._procesando.set()
-
-        def _terminar(_future):
-            self._procesando.clear()
-
-        try:
-            future = asyncio.run_coroutine_threadsafe(
-                self._callback(audio_np), self._loop
-            )
-            future.add_done_callback(_terminar)
-        except Exception as e:
-            log.exception("VAD: error disparando callback: %s", e)
-            self._procesando.clear()
+        _cerrar(stream)
 
 
-# ─────────────────────────────────────────────
-#  Helper
-# ─────────────────────────────────────────────
-
-def _cerrar_stream(stream):
+def _cerrar(stream):
+    if stream is None: return
     try:
-        if stream.active:
-            stream.stop()
+        if stream.active: stream.stop()
         stream.close()
     except Exception:
         pass

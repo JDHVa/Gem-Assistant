@@ -1,6 +1,7 @@
 import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from backend.orquestador import Orquestador
 from backend.config import ajustes
@@ -25,6 +26,14 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="GEM Backend", version="1.0.0", lifespan=lifespan)
+
+# ── CORS — necesario para que Tauri (y el navegador) puedan hacer fetch ──
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Tauri usa tauri://localhost o http://localhost
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 class PeticionTexto(BaseModel):
@@ -96,27 +105,21 @@ async def websocket_endpoint(ws: WebSocket):
             if tipo == "chat":
                 respuesta = await orquestador.procesar_texto(data.get("texto", ""))
                 await ws.send_json({"tipo": "respuesta", "texto": respuesta})
-
             elif tipo == "estado":
                 await ws.send_json({"tipo": "estado", **orquestador.get_estado()})
-
             elif tipo == "registrar_identidad":
                 exito = await orquestador.registrar_identidad()
                 await ws.send_json({"tipo": "identidad", "exito": exito})
-
             elif tipo == "guardar_contexto":
                 await orquestador.guardar_contexto(
-                    data.get("texto", ""),
-                    data.get("coleccion", "proyectos"),
+                    data.get("texto", ""), data.get("coleccion", "proyectos")
                 )
                 await ws.send_json({"tipo": "guardado", "exito": True})
-
             elif tipo == "silenciar":
                 orquestador.silenciar(bool(data.get("silenciado", True)))
                 await ws.send_json(
                     {"tipo": "silenciado", "valor": bool(data.get("silenciado", True))}
                 )
-
             elif tipo == "ping":
                 await ws.send_json({"tipo": "pong"})
 

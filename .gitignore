@@ -1,27 +1,28 @@
-.env
-data/vtube_token.txt
-
 __pycache__/
 *.py[cod]
-*$py.class
-*.egg-info/
+*.pyo
 venv/
-env/
-.pytest_cache/
+.env
+*.egg-info/
 
-data/chromadb/
+# ───── Datos locales ─────
+data/
+assets/avatar/
 assets/face_landmarker.task
 
-# Rust / Tauri
+# ───── Tauri / Rust ─────
 src-tauri/target/
-src-tauri/Cargo.lock
-src-tauri/gen/
 
-# IDE
+# ───── Node (si usas npm para Tauri) ─────
+node_modules/
+
+# ───── OS ─────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ───── IDEs ─────
 .vscode/
 .idea/
-*.swp
-data/.DS_Store
+*.code-workspace
 fallan/
-# Logs
-data/*.log

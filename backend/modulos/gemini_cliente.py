@@ -30,6 +30,7 @@ _cliente: genai.Client | None = None
 
 # ───────── Cliente ─────────
 
+
 def _get_cliente() -> genai.Client:
     global _cliente
     if _cliente is None:
@@ -53,6 +54,7 @@ def _get_cliente() -> genai.Client:
 
 
 # ───────── LLM ─────────
+
 
 def _historial_a_contents(historial: list[dict]) -> list[types.Content]:
     return [
@@ -86,6 +88,7 @@ async def generar_respuesta(historial: list[dict], system_prompt: str) -> str:
 
 # ───────── Embeddings ─────────
 
+
 async def generar_embedding(texto: str) -> list[float]:
     cliente = _get_cliente()
 
@@ -102,6 +105,7 @@ async def generar_embedding(texto: str) -> list[float]:
 
 
 # ───────── STT ─────────
+
 
 def _np_a_wav_bytes(audio: np.ndarray, sample_rate: int) -> bytes:
     if audio.dtype != np.int16:
@@ -140,10 +144,26 @@ async def transcribir_audio(audio: np.ndarray, sample_rate: int) -> str:
 
 # ───────── TTS ─────────
 
+
 def _cloud_tts(texto: str) -> tuple[np.ndarray, int]:
     """
     Google Cloud Text-to-Speech (modo Vertex AI).
-    Usa ADC — no requiere API key adicional.
+
+    Generaciones de voz soportadas (configura TTS_VOZ_CLOUD en .env):
+
+      Chirp3-HD  — la más natural, usa LLMs  ← recomendada
+        es-US-Chirp3-HD-Aoede   femenina, cálida
+        es-US-Chirp3-HD-Leda    femenina, conversacional
+        es-US-Chirp3-HD-Kore    femenina, clara
+        es-US-Chirp3-HD-Zephyr  femenina, expresiva
+
+      Neural2  — buena calidad clásica
+        es-US-Neural2-A / B / C
+
+      WaveNet
+        es-US-Wavenet-A / B / C / D
+
+    Usa ADC para autenticación — no requiere API key adicional.
     """
     try:
         from google.cloud import texttospeech
@@ -165,7 +185,6 @@ def _cloud_tts(texto: str) -> tuple[np.ndarray, int]:
             sample_rate_hertz=ajustes.tts_sample_rate,
         ),
     )
-    # resp.audio_content = WAV completo con cabecera
     buf = io.BytesIO(resp.audio_content)
     with wave.open(buf, "rb") as w:
         pcm = w.readframes(w.getnframes())
@@ -191,7 +210,10 @@ def _gemini_tts(texto: str) -> tuple[np.ndarray, int]:
         ),
     )
     pcm = resp.candidates[0].content.parts[0].inline_data.data
-    return np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0, ajustes.tts_sample_rate
+    return (
+        np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0,
+        ajustes.tts_sample_rate,
+    )
 
 
 async def sintetizar_voz(texto: str) -> tuple[np.ndarray, int]:
@@ -220,11 +242,11 @@ async def sintetizar_voz(texto: str) -> tuple[np.ndarray, int]:
 
 _PROMPT_RIESGO = """Clasifica el riesgo del siguiente comando PowerShell.
 Responde SOLO con una palabra: bajo, medio o alto.
-
+ 
 bajo: lecturas, listados (Get-*, ls, dir).
 medio: instalar software, modificar archivos del usuario.
 alto: borrado masivo, registro, servicios críticos, -Force en rutas del sistema.
-
+ 
 Comando: {comando}
 Riesgo:"""
 
@@ -251,13 +273,13 @@ async def analizar_riesgo_comando(comando: str) -> str:
 
 _PROMPT_CORRECCION = """Eres experto en PowerShell. Un comando falló.
 Devuelve SOLO el comando corregido, sin explicaciones ni backticks.
-
+ 
 Comando original:
 {comando}
-
+ 
 Error:
 {error}
-
+ 
 Comando corregido:"""
 
 

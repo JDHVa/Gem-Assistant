@@ -17,30 +17,21 @@ MEDIAPIPE_MODEL_URL = (
     "face_landmarker/face_landmarker/float16/1/face_landmarker.task"
 )
 
+# ── Umbrales de detección por blendshapes ──
+# Solo emociones que tienen carpeta de avatar (excepto "hablando" que es estado de GEM)
 UMBRALES_EMOCIONES = {
-    "alegre": {"mouthSmileLeft": 0.4, "mouthSmileRight": 0.4},
-    "estresado": {"browDownLeft": 0.35, "browDownRight": 0.35},
-    "confundido": {"browInnerUp": 0.4, "mouthPucker": 0.2},
-    "sorprendido": {"jawOpen": 0.5, "eyeWideLeft": 0.4},
-    "enojado": {"browDownLeft": 0.5, "browDownRight": 0.5, "mouthFrownLeft": 0.3},
-    "triste": {"browInnerUp": 0.4, "mouthFrownLeft": 0.3, "mouthFrownRight": 0.3},
+    "alegre":    {"mouthSmileLeft": 0.4, "mouthSmileRight": 0.4},
+    "ansioso":   {"browInnerUp": 0.5, "mouthStretchLeft": 0.2, "mouthStretchRight": 0.2},
+    "confundido":{"browInnerUp": 0.4, "mouthPucker": 0.2},
+    "dormido":   {"eyeBlinkLeft": 0.8, "eyeBlinkRight": 0.8},
+    "enojado":   {"browDownLeft": 0.5, "browDownRight": 0.5, "mouthFrownLeft": 0.3},
+    "triste":    {"browInnerUp": 0.4, "mouthFrownLeft": 0.3, "mouthFrownRight": 0.3},
     "pensativo": {"eyeLookUpLeft": 0.5, "eyeLookUpRight": 0.5},
-    "dormido": {"eyeBlinkLeft": 0.8, "eyeBlinkRight": 0.8},
-    "ansioso": {"browInnerUp": 0.5, "mouthStretchLeft": 0.2, "mouthStretchRight": 0.2},
 }
+# Si ninguna regla se cumple → neutro
+# "hablando" nunca se detecta por cámara, es exclusivamente un estado de GEM
 
-# Lista de las 9 emociones que usará el avatar
-EMOCIONES_VALIDAS = [
-    "neutro",
-    "alegre",
-    "triste",
-    "enojado",
-    "sorprendido",
-    "confundido",
-    "pensativo",
-    "dormido",
-    "ansioso",
-]
+EMOCIONES_CAMARA = ["alegre", "ansioso", "confundido", "dormido", "enojado", "triste", "pensativo", "neutro"]
 
 
 class ModuloVision:
@@ -54,6 +45,7 @@ class ModuloVision:
             "es_usuario": False,
             "boca_abierta": 0.0,
             "identidad_activa": False,
+            "rostro_detectado": False,
         }
         self._lock = threading.Lock()
 
@@ -68,9 +60,7 @@ class ModuloVision:
     def iniciar(self) -> None:
         self._descargar_modelo()
         opciones = mp_vision.FaceLandmarkerOptions(
-            base_options=mp_python.BaseOptions(
-                model_asset_path=ajustes.mediapipe_model_path
-            ),
+            base_options=mp_python.BaseOptions(model_asset_path=ajustes.mediapipe_model_path),
             output_face_blendshapes=True,
             num_faces=1,
             running_mode=mp_vision.RunningMode.IMAGE,
@@ -91,16 +81,14 @@ class ModuloVision:
         return coords / norma if norma > 0 else coords
 
     def registrar_identidad(self, landmarks: list) -> None:
-        vec = self._landmarks_a_vector(landmarks)
         with self._lock:
-            self._identidad_vec = vec
+            self._identidad_vec = self._landmarks_a_vector(landmarks)
             self._estado["identidad_activa"] = True
 
     def _similitud_identidad(self, landmarks: list) -> float:
         if self._identidad_vec is None:
             return 1.0
-        vec = self._landmarks_a_vector(landmarks)
-        return float(np.dot(self._identidad_vec, vec))
+        return float(np.dot(self._identidad_vec, self._landmarks_a_vector(landmarks)))
 
     def _detectar_emocion(self, bs: dict[str, float]) -> str:
         for emocion, reqs in UMBRALES_EMOCIONES.items():
@@ -111,22 +99,22 @@ class ModuloVision:
     def _procesar_resultado(self, resultado: mp_vision.FaceLandmarkerResult) -> None:
         if not resultado.face_landmarks or not resultado.face_blendshapes:
             with self._lock:
-                self._estado["es_usuario"] = False
-                self._estado["emocion"] = "neutro"
+                self._estado["es_usuario"]      = False
+                self._estado["emocion"]          = "neutro"
+                self._estado["rostro_detectado"] = False
             return
-        landmarks = resultado.face_landmarks[0]
-        blendshapes = {
-            bs.category_name: bs.score for bs in resultado.face_blendshapes[0]
-        }
-        similitud = self._similitud_identidad(landmarks)
-        emocion = self._detectar_emocion(blendshapes)
-        boca = blendshapes.get("jawOpen", 0.0)
+        landmarks  = resultado.face_landmarks[0]
+        blendshapes = {bs.category_name: bs.score for bs in resultado.face_blendshapes[0]}
+        similitud  = self._similitud_identidad(landmarks)
+        emocion    = self._detectar_emocion(blendshapes)
+        boca       = blendshapes.get("jawOpen", 0.0)
         with self._lock:
             self._estado = {
-                "emocion": emocion,
-                "es_usuario": similitud >= ajustes.identidad_umbral,
-                "boca_abierta": boca,
-                "identidad_activa": self._identidad_vec is not None,
+                "emocion":           emocion,
+                "es_usuario":        similitud >= ajustes.identidad_umbral,
+                "boca_abierta":      boca,
+                "identidad_activa":  self._identidad_vec is not None,
+                "rostro_detectado":  True,
             }
 
     def _loop_camara(self) -> None:
@@ -134,26 +122,22 @@ class ModuloVision:
         if not camara.isOpened():
             log.error("No se pudo abrir la cámara. Visión deshabilitada.")
             return
-
         intervalo = 1.0 / max(1, ajustes.vision_fps)
         try:
             while self._activo:
-                t_inicio = time.time()
+                t0 = time.time()
                 ret, frame = camara.read()
                 if not ret or self._landmarker is None:
-                    time.sleep(0.1)
-                    continue
+                    time.sleep(0.1); continue
                 try:
                     frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    imagen = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
+                    imagen    = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
                     resultado = self._landmarker.detect(imagen)
                     self._procesar_resultado(resultado)
                 except Exception as e:
                     log.debug("Frame error: %s", e)
-
-                tiempo_restante = intervalo - (time.time() - t_inicio)
-                if tiempo_restante > 0:
-                    time.sleep(tiempo_restante)
+                restante = intervalo - (time.time() - t0)
+                if restante > 0: time.sleep(restante)
         finally:
             camara.release()
 
@@ -163,28 +147,23 @@ class ModuloVision:
 
     def registrar_desde_camara(self) -> bool:
         if self._landmarker is None:
-            log.warning("Landmarker no iniciado")
             return False
         camara = cv2.VideoCapture(0)
         if not camara.isOpened():
-            log.warning("No se pudo abrir cámara para registro")
             return False
         exito = False
         try:
             for _ in range(30):
                 ret, frame = camara.read()
-                if not ret:
-                    continue
+                if not ret: continue
                 try:
                     frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    imagen = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
+                    imagen    = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
                     resultado = self._landmarker.detect(imagen)
                     if resultado.face_landmarks:
                         self.registrar_identidad(resultado.face_landmarks[0])
-                        exito = True
-                        break
-                except Exception:
-                    continue
+                        exito = True; break
+                except Exception: continue
         finally:
             camara.release()
         return exito

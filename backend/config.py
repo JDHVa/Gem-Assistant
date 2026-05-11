@@ -27,57 +27,59 @@ class Ajustes(BaseSettings):
     )
 
     # ───── Modo ─────
-    usar_vertex: bool    = Field(default=False)
-    vertex_project: str  = Field(default="")
+    usar_vertex: bool = Field(default=False)
+    vertex_project: str = Field(default="")
     vertex_location: str = Field(default="us-central1")
 
     # ───── AI Studio ─────
     gemini_api_key: str = Field(default="")
 
     # ───── Modelos ─────
-    gemini_modelo: str           = "gemini-2.0-flash-001"
-    gemini_modelo_stt: str       = "gemini-2.0-flash-001"
-    gemini_modelo_tts: str       = "gemini-2.5-flash-preview-tts"
+    gemini_modelo: str = "gemini-2.0-flash-001"
+    gemini_modelo_stt: str = "gemini-2.0-flash-001"
+    gemini_modelo_tts: str = "gemini-2.5-flash-preview-tts"
     gemini_modelo_embedding: str = "text-embedding-004"
 
     # ───── TTS ─────
-    tts_voz: str         = "Kore"          # AI Studio
+    tts_voz: str = "Kore"  # AI Studio
     tts_sample_rate: int = 24000
-    tts_idioma: str      = "es-US"         # Vertex
-    tts_voz_cloud: str   = "es-US-Neural2-A"
+    tts_idioma: str = "es-US"  # Vertex
+    tts_voz_cloud: str = "es-US-Chirp3-HD-Aoede"
 
     # ───── FastAPI ─────
     fastapi_host: str = "127.0.0.1"
     fastapi_port: int = 8765
 
     # ───── Audio ─────
-    sample_rate: int          = 16000
-    silence_duration_s: float = 1.2    # silencio para dar la frase por terminada
-    silence_threshold: float  = 0.012
-    max_grabacion_s: float    = 15.0
+    sample_rate: int = 16000
+    silence_duration_s: float = 1.4  # silencio para dar la frase por terminada
+    silence_threshold: float = 0.012
+    max_grabacion_s: float = 15.0
 
     # ───── VAD (Voice Activity Detection) ─────
     # Reemplaza completamente openWakeWord.
     # El sistema escucha siempre; solo dispara cuando hay una frase
     # de al menos vad_min_frase_s segundos continuos de voz.
-    vad_rms_umbral: float    = 0.012   # RMS mínimo para considerar que hay voz
-                                        # (mismo valor que silence_threshold por defecto)
-    vad_min_frase_s: float   = 0.8     # mínimo de voz continua para disparar
-                                        # ruidos < 0.8s se ignoran
-    fallback_cooldown_s: float = 5.0   # pausa post-TTS para no re-activar con la propia voz
+    vad_rms_umbral: float = 0.012  # RMS mínimo para considerar que hay voz
+    # (mismo valor que silence_threshold por defecto)
+    vad_min_frase_s: float = 0.5  # mínimo de voz continua para disparar
+    # ruidos < 0.8s se ignoran
+    fallback_cooldown_s: float = (
+        5.0  # pausa post-TTS para no re-activar con la propia voz
+    )
 
     # ───── Visión ─────
     mediapipe_model_path: str = str(RAIZ_PROYECTO / "assets" / "face_landmarker.task")
-    identidad_umbral: float   = 0.85
-    vision_fps: int           = 10
+    identidad_umbral: float = 0.85
+    vision_fps: int = 10
 
     # ───── Memoria ─────
     chromadb_path: str = str(RAIZ_PROYECTO / "data" / "chromadb")
-    rag_top_k: int     = 5
+    rag_top_k: int = 5
 
     # ───── PowerShell ─────
     ps_max_retries: int = 3
-    ps_timeout_s: int   = 60
+    ps_timeout_s: int = 60
 
     # ───── Avatar ─────
     avatar_path: str = str(RAIZ_PROYECTO / "assets" / "avatar")
@@ -102,7 +104,8 @@ class Ajustes(BaseSettings):
                 )
             log.info(
                 "Modo VERTEX AI — proyecto='%s', región='%s'",
-                self.vertex_project, self.vertex_location,
+                self.vertex_project,
+                self.vertex_location,
             )
         else:
             if not self.gemini_api_key:
@@ -122,7 +125,9 @@ class Ajustes(BaseSettings):
 
         log.info(
             "VAD — umbral=%.3f, frase_mín=%.1fs, silencio=%.1fs",
-            self.vad_rms_umbral, self.vad_min_frase_s, self.silence_duration_s,
+            self.vad_rms_umbral,
+            self.vad_min_frase_s,
+            self.silence_duration_s,
         )
         return self
 
