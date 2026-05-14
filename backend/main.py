@@ -68,6 +68,7 @@ class PeticionMute(BaseModel):
 
 
 class PeticionIdentidad(BaseModel):
+    nombre: str
     muestras: int = 10
     timeout_s: float = 8.0
 
@@ -97,15 +98,25 @@ async def mute_microfono(p: PeticionMute):
 
 
 @app.post("/registrar_identidad")
-async def registrar_identidad(p: PeticionIdentidad = None):
-    p = p or PeticionIdentidad()
-    return await orquestador.registrar_identidad(p.muestras, p.timeout_s)
+async def registrar_identidad(p: PeticionIdentidad):
+    return await orquestador.registrar_identidad(p.nombre, p.muestras, p.timeout_s)
 
 
 @app.delete("/identidad")
 async def borrar_identidad():
     await orquestador.borrar_identidad()
     return {"borrado": True}
+
+
+@app.get("/identidades")
+async def listar_identidades():
+    return {"identidades": orquestador._vision.listar_identidades()}
+
+
+@app.delete("/identidades/{nombre}")
+async def borrar_identidad(nombre: str):
+    ok = orquestador._vision.borrar_identidad_nombrada(nombre)
+    return {"borrado": ok}
 
 
 @app.get("/camara/snapshot")

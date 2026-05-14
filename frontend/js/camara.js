@@ -35,13 +35,16 @@ async function actualizarInfo() {
 }
 
 async function registrar() {
+  const nombre = prompt("¿Cómo se llama esta persona?", "Jesús");
+  if (!nombre || !nombre.trim()) return;
+  
   const info = document.getElementById("cam-info");
-  info.textContent = "Capturando muestras durante ~8s. Quédate quieto, mira a la cámara, mueve un poco la cabeza...";
+  info.textContent = `Capturando rostro de ${nombre}... quédate quieto frente a la cámara unos segundos.`;
   try {
     const r = await fetch(`${BACKEND}/registrar_identidad`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ muestras: 10, timeout_s: 8.0 }),
+      body: JSON.stringify({ nombre: nombre.trim(), muestras: 10, timeout_s: 8.0 }),
     });
     const d = await r.json();
     info.textContent = d.mensaje || "Listo.";
@@ -50,4 +53,4 @@ async function registrar() {
   }
 }
 
-export const Camara = { abrir, cerrar, registrar };
+export const Camara = { abrir, cerrar, registrar };registrar

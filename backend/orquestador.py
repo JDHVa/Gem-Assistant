@@ -145,6 +145,9 @@ class Orquestador:
     # ── Emociones ──────────────────────────────────────────────────────
 
     async def _set_emocion(self, emocion: str):
+        import time
+
+        self._ultimo_set_emocion = time.time()
         if emocion == self._emocion_gem:
             return
         self._emocion_gem = emocion
@@ -155,13 +158,19 @@ class Orquestador:
         await self._set_emocion(MAPA_ESPEJO.get(emocion_usuario, "alegre"))
 
     async def _loop_espejo_emocion(self):
+        import time
+
+        self._ultimo_set_emocion = time.time()
         while True:
             await asyncio.sleep(4)
-            if not self._procesando and self._emocion_gem not in (
-                EMOCION_HABLANDO,
-                EMOCION_PROCESANDO,
-            ):
-                await self._set_emocion_idle()
+            if self._procesando:
+                continue
+            if self._emocion_gem in (EMOCION_HABLANDO, EMOCION_PROCESANDO):
+                continue
+            # Solo espejar si llevamos >20s sin actualización manual
+            if time.time() - getattr(self, "_ultimo_set_emocion", 0) < 20:
+                continue
+            await self._set_emocion_idle()
 
     # ── Broadcasts ─────────────────────────────────────────────────────
 
@@ -246,9 +255,13 @@ class Orquestador:
         fragmentos = await self._memoria.buscar_todo(texto_usuario)
         resumen_perfil = await self._perfil.resumen_para_prompt()
 
+        estado_vis = self._vision.get_estado()
+        persona = estado_vis.get("persona", "desconocido")
+
         prompt = construir_prompt(
-            emocion=self._vision.get_estado().get("emocion", "neutro"),
-            es_usuario=self._vision.get_estado().get("es_usuario", False),
+            emocion=estado_vis.get("emocion", "neutro"),
+            es_usuario=estado_vis.get("es_usuario", False),
+            persona_actual=persona,
             turnos=len(self._historial) // 2,
             memoria=self._memoria.estadisticas(),
             silenciado=self._silenciado,
@@ -258,22 +271,49 @@ class Orquestador:
 
         await self._set_emocion(EMOCION_PROCESANDO)
         try:
-            respuesta = await generar_respuesta(self._historial, system_prompt=prompt)
+            respuesta_obj = await generar_respuesta(
+                self._historial, system_prompt=prompt
+            )
         except Exception as e:
             log.exception("Error generando respuesta: %s", e)
             await self._responder("Tuve un problema generando la respuesta.")
             await self._set_emocion(EMOCION_ERROR)
             return ""
 
-        self._historial.append({"rol": "model", "texto": respuesta})
+        texto = respuesta_obj.get("texto", "")
+        emocion = respuesta_obj.get("emocion", "neutro")
+        emocion = (
+            (emocion or "neutro").lower().strip()
+        )  # ← AÑADE esta línea para evitar "Alegre" vs "alegre"
+
+        EMOCIONES_VALIDAS = {
+            "alegre",
+            "neutro",
+            "pensativo",
+            "triste",
+            "enojado",
+            "confundido",
+            "ansioso",
+            "dormido",
+            "hablando",
+        }
+        gesto = respuesta_obj.get("gesto") or None
+        if emocion in EMOCIONES_VALIDAS:
+            await self._set_emocion(emocion)
+        else:
+            log.warning("Emoción no reconocida: %r", emocion)
+        if gesto:
+            await self._broadcaster.broadcast({"tipo": "gesto", "nombre": gesto})
+
+        self._historial.append({"rol": "model", "texto": texto})
         self._historial_persistente.guardar(self._historial)
 
         await asyncio.gather(
-            self._guardar_conversacion(texto_usuario, respuesta),
-            self._responder(respuesta),
+            self._guardar_conversacion(texto_usuario, texto),
+            self._responder(texto),
             return_exceptions=True,
         )
-        return respuesta
+        return texto
 
     async def _flujo_agente(self, texto_usuario: str) -> str:
         fragmentos = await self._memoria.buscar(texto_usuario, "comandos", k=3)
@@ -397,16 +437,22 @@ class Orquestador:
     # ── TTS ────────────────────────────────────────────────────────────
 
     async def _responder(self, texto: str) -> None:
+        import time
+
         await self._broadcaster.broadcast({"tipo": "respuesta", "texto": texto})
         if not self._audio or not texto.strip():
             return
+        # Guarda la emoción que Gemini eligió antes de pasar a "hablando"
+        emocion_post_tts = self._emocion_gem
         await self._set_emocion(EMOCION_HABLANDO)
         try:
             await self._audio.sintetizar_y_reproducir(texto)
         except Exception as e:
             log.exception("Error reproduciendo: %s", e)
         finally:
-            await self._set_emocion_idle()
+            # Regresar a la emoción que Gemini eligió, no a la del espejo
+            await self._set_emocion(emocion_post_tts)
+            self._ultimo_set_emocion = time.time()  # MAL: sobrescribe la emoción
 
     async def _guardar_conversacion(self, p: str, r: str) -> None:
         try:
@@ -422,12 +468,12 @@ class Orquestador:
         return await self._pipeline(texto)
 
     async def registrar_identidad(
-        self, muestras: int = 10, timeout_s: float = 8.0
+        self, nombre: str, muestras: int = 10, timeout_s: float = 8.0
     ) -> dict:
         import asyncio
 
         return await asyncio.to_thread(
-            self._vision.registrar_desde_camara, muestras, timeout_s
+            self._vision.registrar_desde_camara, nombre, muestras, timeout_s
         )
 
     async def borrar_identidad(self) -> None:

@@ -47,7 +47,9 @@ class ModuloVision:
         self._activo = False
         self._hilo: threading.Thread | None = None
         self._landmarker: mp_vision.FaceLandmarker | None = None
-        self._identidad_vec: np.ndarray | None = None
+        self._identidades: dict[str, np.ndarray] = {}
+        self._identidades_path = Path(ajustes.chromadb_path).parent / "identidades.npz"
+        self._cargar_identidades()
         self._estado: dict = {
             "emocion": "neutro",
             "es_usuario": False,
@@ -73,6 +75,40 @@ class ModuloVision:
             log.info("Descargando modelo MediaPipe...")
             path.parent.mkdir(parents=True, exist_ok=True)
             urllib.request.urlretrieve(MEDIAPIPE_MODEL_URL, path)
+
+    def _cargar_identidades(self):
+        if not self._identidades_path.exists():
+            return
+        try:
+            data = np.load(self._identidades_path, allow_pickle=False)
+            for nombre in data.files:
+                self._identidades[nombre] = data[nombre]
+            log.info(
+                "Cargadas %d identidades: %s",
+                len(self._identidades),
+                list(self._identidades.keys()),
+            )
+        except Exception as e:
+            log.warning("No se pudieron cargar identidades: %s", e)
+
+    def _guardar_identidades(self):
+        try:
+            self._identidades_path.parent.mkdir(parents=True, exist_ok=True)
+            np.savez(self._identidades_path, **self._identidades)
+        except Exception as e:
+            log.error("No se pudieron guardar identidades: %s", e)
+
+    def listar_identidades(self) -> list[dict]:
+        return [
+            {"nombre": n, "dims": int(v.shape[0])} for n, v in self._identidades.items()
+        ]
+
+    def borrar_identidad_nombrada(self, nombre: str) -> bool:
+        if nombre in self._identidades:
+            del self._identidades[nombre]
+            self._guardar_identidades()
+            return True
+        return False
 
     def iniciar(self) -> None:
         self._descargar_modelo()
@@ -100,10 +136,19 @@ class ModuloVision:
         norma = np.linalg.norm(coords)
         return coords / norma if norma > 0 else coords
 
-    def _similitud_identidad(self, landmarks: list) -> float:
-        if self._identidad_vec is None:
-            return 1.0
-        return float(np.dot(self._identidad_vec, self._landmarks_a_vector(landmarks)))
+    def _identificar_persona(self, landmarks) -> tuple[str, float]:
+        """Devuelve (nombre_o_'desconocido', similitud_maxima)."""
+        if not self._identidades:
+            return "desconocido", 0.0
+        vec = self._landmarks_a_vector(landmarks)
+        mejor_nombre, mejor_sim = "desconocido", -1.0
+        for nombre, ref in self._identidades.items():
+            sim = float(np.dot(ref, vec))
+            if sim > mejor_sim:
+                mejor_sim, mejor_nombre = sim, nombre
+        if mejor_sim < ajustes.identidad_umbral:
+            return "desconocido", mejor_sim
+        return mejor_nombre, mejor_sim
 
     def _detectar_emocion(self, bs: dict[str, float]) -> str:
         for emocion, reqs in UMBRALES_EMOCIONES.items():
@@ -195,6 +240,7 @@ class ModuloVision:
                     {
                         "rostro_detectado": False,
                         "es_usuario": False,
+                        "persona": "desconocido",
                         "emocion": "neutro",
                         "boca_abierta": 0.0,
                         "personas_extra": False,
@@ -208,16 +254,17 @@ class ModuloVision:
         blendshapes = {
             bs.category_name: bs.score for bs in resultado.face_blendshapes[0]
         }
-        similitud = self._similitud_identidad(landmarks)
+        persona, similitud = self._identificar_persona(landmarks)
         emocion = self._detectar_emocion(blendshapes)
         boca = blendshapes.get("jawOpen", 0.0)
 
         with self._lock:
             self._estado = {
                 "emocion": emocion,
-                "es_usuario": similitud >= ajustes.identidad_umbral,
+                "persona": persona,
+                "es_usuario": persona != "desconocido",
                 "boca_abierta": boca,
-                "identidad_activa": self._identidad_vec is not None,
+                "identidad_activa": bool(self._identidades),
                 "rostro_detectado": True,
                 "personas_extra": num_caras > 1,
                 "num_caras": num_caras,
@@ -324,6 +371,7 @@ class ModuloVision:
 
     def registrar_desde_camara(
         self,
+        nombre: str,
         muestras_objetivo: int = 10,
         timeout_s: float = 8.0,
     ) -> dict:
@@ -331,11 +379,14 @@ class ModuloVision:
         MUESTRAS_OBJETIVO = muestras_objetivo
 
         if self._landmarker is None or not self._activo:
-            return {"exito": False, "mensaje": "El módulo de visión no está activo."}
+            return {"exito": False, "mensaje": "Visión no activa."}
+
+        nombre = (nombre or "").strip()
+        if not nombre:
+            return {"exito": False, "mensaje": "Necesito un nombre para registrar."}
 
         self._muestras_identidad = []
         self._capturando_identidad = True
-
         try:
             t0 = time.time()
             while time.time() - t0 < timeout_s:
@@ -349,8 +400,7 @@ class ModuloVision:
         if n < 3:
             return {
                 "exito": False,
-                "mensaje": f"Solo capturé {n} muestras (necesito al menos 3). "
-                "Asegúrate de estar bien iluminado y frente a la cámara.",
+                "mensaje": f"Solo capturé {n} muestras.",
                 "muestras": n,
             }
 
@@ -359,25 +409,32 @@ class ModuloVision:
         if norma > 0:
             promedio = promedio / norma
 
-        similitudes_inter = [
-            float(np.dot(promedio, m / max(np.linalg.norm(m), 1e-9)))
-            for m in self._muestras_identidad
-        ]
-        consistencia = float(np.mean(similitudes_inter))
+        consistencia = float(
+            np.mean(
+                [
+                    float(np.dot(promedio, m / max(np.linalg.norm(m), 1e-9)))
+                    for m in self._muestras_identidad
+                ]
+            )
+        )
 
+        self._identidades[nombre] = promedio
+        self._guardar_identidades()
         with self._lock:
-            self._identidad_vec = promedio
             self._estado["identidad_activa"] = True
 
         log.info(
-            "Identidad registrada con %d muestras (consistencia=%.3f)", n, consistencia
+            "Identidad '%s' registrada con %d muestras (consistencia=%.3f)",
+            nombre,
+            n,
+            consistencia,
         )
         return {
             "exito": True,
+            "nombre": nombre,
             "muestras": n,
             "consistencia": round(consistencia, 3),
-            "mensaje": f"Rostro registrado con {n} muestras "
-            f"(consistencia {consistencia:.2f}).",
+            "mensaje": f"Listo, '{nombre}' registrado con {n} muestras.",
         }
 
     def borrar_identidad(self) -> None:

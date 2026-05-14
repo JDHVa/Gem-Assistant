@@ -46,6 +46,9 @@ function conectar() {
     else if (d.tipo === "respuesta") {
       document.getElementById("msg").textContent = d.texto || "";
     }
+    else if (d.tipo === "gesto") {
+      Avatar.ejecutarGesto(d.nombre, d.intensidad || 1.0);
+    }
     else if (d.tipo === "trigger_proactivo") {
       console.log("trigger proactivo:", d.subtipo, d.mensaje);
     }

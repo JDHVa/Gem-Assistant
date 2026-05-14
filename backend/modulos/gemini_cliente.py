@@ -36,12 +36,16 @@ _cliente: genai.Client | None = None
 
 # ───────── Cliente (inyectable para tests) ─────────
 
+
 def _get_cliente() -> genai.Client:
     global _cliente
     if _cliente is None:
         if ajustes.usar_vertex:
-            log.info("Conectando a Vertex AI — proyecto=%s región=%s",
-                     ajustes.vertex_project, ajustes.vertex_location)
+            log.info(
+                "Conectando a Vertex AI — proyecto=%s región=%s",
+                ajustes.vertex_project,
+                ajustes.vertex_location,
+            )
             _cliente = genai.Client(
                 vertexai=True,
                 project=ajustes.vertex_project,
@@ -61,6 +65,7 @@ def set_cliente(cliente) -> None:
 
 # ───────── LLM ─────────
 
+
 def _historial_a_contents(historial: list[dict]) -> list[types.Content]:
     return [
         types.Content(
@@ -71,13 +76,21 @@ def _historial_a_contents(historial: list[dict]) -> list[types.Content]:
     ]
 
 
-async def generar_respuesta(historial: list[dict], system_prompt: str) -> str:
+import json as _json
+
+
+async def generar_respuesta(historial: list[dict], system_prompt: str) -> dict:
+    """
+    Devuelve {"emocion": str, "texto": str}.
+    Si Gemini no respeta el formato, hace fallback: emocion="neutro", texto=raw.
+    """
     cliente = _get_cliente()
     contents = _historial_a_contents(historial)
     config = types.GenerateContentConfig(
         system_instruction=system_prompt,
         temperature=0.7,
         max_output_tokens=1024,
+        response_mime_type="application/json",
     )
 
     def _llamar() -> str:
@@ -88,7 +101,28 @@ async def generar_respuesta(historial: list[dict], system_prompt: str) -> str:
         )
         return (resp.text or "").strip()
 
-    return await asyncio.to_thread(_llamar)
+    raw = await asyncio.to_thread(_llamar)
+    raw = (
+        raw.strip()
+        .removeprefix("```json")
+        .removeprefix("```")
+        .removesuffix("```")
+        .strip()
+    )
+
+    try:
+        obj = _json.loads(raw)
+        if isinstance(obj, dict) and "texto" in obj:
+            return {
+                "emocion": str(obj.get("emocion") or "neutro"),
+                "texto": str(obj.get("texto") or ""),
+                "gesto": str(obj.get("gesto") or "") or None,
+            }
+    except Exception:
+        pass
+    log.info("Respuesta cruda Gemini: %r", raw)
+    log.info("Parseado: %r", obj if "obj" in dir() else "no parseado")
+    return {"emocion": "neutro", "texto": raw}
 
 
 async def generar_respuesta_ligero(prompt: str, max_tokens: int = 256) -> str:
@@ -99,7 +133,9 @@ async def generar_respuesta_ligero(prompt: str, max_tokens: int = 256) -> str:
         resp = cliente.models.generate_content(
             model=ajustes.gemini_modelo_ligero,
             contents=prompt,
-            config=types.GenerateContentConfig(temperature=0.0, max_output_tokens=max_tokens),
+            config=types.GenerateContentConfig(
+                temperature=0.0, max_output_tokens=max_tokens
+            ),
         )
         return (resp.text or "").strip()
 
@@ -123,6 +159,7 @@ async def resumir_historial(turnos: list[dict]) -> str:
 
 
 # ───────── Embeddings (con cache LRU) ─────────
+
 
 class _CacheLRU:
     def __init__(self, max_size: int):
@@ -169,6 +206,7 @@ async def generar_embedding(texto: str) -> list[float]:
 
 # ───────── STT ─────────
 
+
 def _np_a_wav_bytes(audio: np.ndarray, sample_rate: int) -> bytes:
     if audio.dtype != np.int16:
         audio_i16 = (np.clip(audio, -1.0, 1.0) * 32767.0).astype(np.int16)
@@ -205,10 +243,12 @@ async def transcribir_audio(audio: np.ndarray, sample_rate: int) -> str:
 
 # ───────── Vision (con redimensionado para ahorrar tokens) ─────────
 
+
 def _reducir_imagen(jpeg_bytes: bytes) -> bytes:
     """Redimensiona si excede vision_max_pixels y recomprime."""
     try:
         import cv2
+
         arr = np.frombuffer(jpeg_bytes, dtype=np.uint8)
         img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
         if img is None:
@@ -219,8 +259,9 @@ def _reducir_imagen(jpeg_bytes: bytes) -> bytes:
             factor = (ajustes.vision_max_pixels / pixels) ** 0.5
             nw, nh = int(w * factor), int(h * factor)
             img = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_AREA)
-        ok, buf = cv2.imencode(".jpg", img,
-                                [cv2.IMWRITE_JPEG_QUALITY, ajustes.vision_jpeg_quality])
+        ok, buf = cv2.imencode(
+            ".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, ajustes.vision_jpeg_quality]
+        )
         return bytes(buf) if ok else jpeg_bytes
     except Exception as e:
         log.debug("Reducir imagen falló: %s", e)
@@ -238,7 +279,9 @@ async def analizar_imagen(jpeg_bytes: bytes, prompt: str, max_tokens: int = 512)
                 types.Part.from_bytes(data=reducido, mime_type="image/jpeg"),
                 prompt,
             ],
-            config=types.GenerateContentConfig(temperature=0.1, max_output_tokens=max_tokens),
+            config=types.GenerateContentConfig(
+                temperature=0.1, max_output_tokens=max_tokens
+            ),
         )
         return (resp.text or "").strip()
 
@@ -247,11 +290,14 @@ async def analizar_imagen(jpeg_bytes: bytes, prompt: str, max_tokens: int = 512)
 
 # ───────── TTS ─────────
 
+
 def _cloud_tts(texto: str) -> tuple[np.ndarray, int]:
     try:
         from google.cloud import texttospeech
     except ImportError:
-        raise RuntimeError("Falta google-cloud-texttospeech. pip install google-cloud-texttospeech")
+        raise RuntimeError(
+            "Falta google-cloud-texttospeech. pip install google-cloud-texttospeech"
+        )
 
     client = texttospeech.TextToSpeechClient()
     resp = client.synthesize_speech(
@@ -268,7 +314,7 @@ def _cloud_tts(texto: str) -> tuple[np.ndarray, int]:
     buf = io.BytesIO(resp.audio_content)
     with wave.open(buf, "rb") as w:
         pcm = w.readframes(w.getnframes())
-        sr  = w.getframerate()
+        sr = w.getframerate()
     return np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0, sr
 
 
@@ -289,7 +335,10 @@ def _gemini_tts(texto: str) -> tuple[np.ndarray, int]:
         ),
     )
     pcm = resp.candidates[0].content.parts[0].inline_data.data
-    return np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0, ajustes.tts_sample_rate
+    return (
+        np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0,
+        ajustes.tts_sample_rate,
+    )
 
 
 async def _edge_tts(texto: str) -> tuple[np.ndarray, int]:
@@ -311,12 +360,23 @@ async def _edge_tts(texto: str) -> tuple[np.ndarray, int]:
         return np.zeros(0, dtype=np.float32), ajustes.tts_sample_rate
 
     import subprocess, shutil
+
     if shutil.which("ffmpeg"):
         proc = subprocess.run(
-            ["ffmpeg", "-i", "pipe:0",
-             "-f", "s16le", "-ar", str(ajustes.tts_sample_rate),
-             "-ac", "1", "pipe:1"],
-            input=mp3_bytes, capture_output=True,
+            [
+                "ffmpeg",
+                "-i",
+                "pipe:0",
+                "-f",
+                "s16le",
+                "-ar",
+                str(ajustes.tts_sample_rate),
+                "-ac",
+                "1",
+                "pipe:1",
+            ],
+            input=mp3_bytes,
+            capture_output=True,
         )
         if proc.returncode == 0:
             audio_i16 = np.frombuffer(proc.stdout, dtype=np.int16)
@@ -324,6 +384,7 @@ async def _edge_tts(texto: str) -> tuple[np.ndarray, int]:
 
     try:
         from pydub import AudioSegment
+
         seg = AudioSegment.from_mp3(io.BytesIO(mp3_bytes))
         seg = seg.set_channels(1).set_frame_rate(ajustes.tts_sample_rate)
         pcm = np.array(seg.get_array_of_samples(), dtype=np.int16)
